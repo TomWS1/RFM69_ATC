@@ -46,7 +46,6 @@ bool RFM69_ATC::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
   
   _powerBoost = false;    // TWS: require someone to explicitly turn boost on!
   _transmitLevel = 31;    // TWS: match default value in PA Level register...
-  _hookCtr = 0;
   return RFM69::initialize(freqBand, nodeID, networkID);  // use base class to initialize most everything
 }
 
