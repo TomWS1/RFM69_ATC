@@ -32,6 +32,28 @@
 #include <RFM69registers.h>
 #include <SPI.h>
 
+#define  LISTEN_HIGHSPEED  // use 200Kbps for Listen Mode
+
+//#define USE_SERIAL
+
+#ifdef USE_SERIAL
+#define PRINT(x) Serial.print(x)
+#define PRINTLN(x) Serial.println(x)
+#define PRINT2(x,y) Serial.print(x,y)
+#define PRINTLN2(x,y) Serial.println(x,y)
+#else
+#define PRINT(x) 
+#define PRINTLN(x) 
+#define PRINT2(x,y) 
+#define PRINTLN2(x,y) 
+#endif
+#ifdef USE_SERIAL
+  #define CHECKPOINT { PRINT(__FUNCTION__); PRINTLN(__LINE__); }
+#else
+  #define CHECKPOINT
+#endif
+
+
 volatile byte RFM69_ATC::ACK_RSSI_REQUESTED;  // new type of flag on ACK_REQUEST
 
 //=============================================================================
@@ -46,7 +68,80 @@ bool RFM69_ATC::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
   
   _powerBoost = false;    // TWS: require someone to explicitly turn boost on!
   _transmitLevel = 31;    // TWS: match default value in PA Level register...
-  return RFM69::initialize(freqBand, nodeID, networkID);  // use base class to initialize most everything
+
+#ifdef SPI_HAS_TRANSACTION
+  SPI.usingInterrupt(_interruptNum);
+#else
+  #error "MUST HAVE SPI_HAS_TRANSACTION DEFINED!"
+#endif
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  
+  bool rc = RFM69::initialize(freqBand, nodeID, networkID);  // use base class to initialize most everything
+  PRINT("transmit level after init:"); PRINTLN(_transmitLevel);
+  return rc;
+}
+
+//=============================================================================
+// restoreInit() - use base class initialization, but keep current powerlevel settings and existing RSSI controls
+//=============================================================================
+void RFM69_ATC::restoreInit(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
+{
+  uint8_t 
+    saveTransmitLevel = _transmitLevel;
+
+  _ackRSSI = 0;           // TWS: no existing response yet...
+  ACK_RSSI_REQUESTED = 0; // TWS: init to none
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  
+  RFM69::initialize(freqBand, nodeID, networkID);  // use base class to re-initialize most everything
+    
+  if (_isRFM69HW)  // set HighPower ONLY if RFM69HW type radio, otherwise use internal PA
+    setHighPower(true, 0x20);          // might be overridden if transmitLevel >31...
+  setPowerLevel(saveTransmitLevel);  // but restore transmit level to last value
+}
+
+
+
+//=============================================================================
+// select() - replaces base class with one supporting spiTransactions
+//=============================================================================
+// select the transceiver
+void RFM69_ATC::select() {
+  // save current SPI settings
+  _SPCR = SPCR;
+  _SPSR = SPSR;
+  _SREG = SREG;
+#ifdef SPI_HAS_TRANSACTION
+  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+#else
+  noInterrupts();
+  // set RFM69 SPI settings
+  SPI.setDataMode(SPI_MODE0);
+  SPI.setBitOrder(MSBFIRST);
+  SPI.setClockDivider(SPI_CLOCK_DIV4); // decided to slow down from DIV2 after SPI stalling in some instances, especially visible on mega1284p when RFM69 and FLASH chip both present
+#endif
+  digitalWrite(_slaveSelectPin, LOW);
+}
+
+
+//=============================================================================
+// unselect() - replaces base class with one supporting spiTransactions
+//=============================================================================
+// UNselect the transceiver chip
+void RFM69_ATC::unselect() {
+  digitalWrite(_slaveSelectPin, HIGH);
+#ifdef SPI_HAS_TRANSACTION
+  SPI.endTransaction();
+#else  
+  SREG = _SREG;
+#endif
+  // restore SPI settings to what they were before talking to RFM69
+  SPCR = _SPCR;
+  SPSR = _SPSR;
 }
 
 
@@ -73,13 +168,22 @@ void RFM69_ATC::setMode(uint8_t newMode)
 // sendAck() - updated to call new sendFrame with additional parameters
 //=============================================================================
 // should be called immediately after reception in case sender wants ACK
-void RFM69_ATC::sendACK(const void* buffer, uint8_t bufferSize) {
-  uint8_t sender = SENDERID;
-  int16_t _RSSI = RSSI; // save payload received RSSI value
-  bool sendRSSI = ACK_RSSI_REQUESTED;  
+void RFM69_ATC::sendACK(const void* buffer, uint8_t bufferSize) 
+{
+  uint8_t 
+    sender = SENDERID;
+  int16_t 
+    _RSSI = RSSI; // save payload received RSSI value
+  bool 
+    sendRSSI = ACK_RSSI_REQUESTED;  
+    
   writeReg(REG_PACKETCONFIG2, (readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART); // avoid RX deadlocks
-  uint32_t now = millis();
+  
+  uint32_t 
+    now = millis();
+    
   while (!canSend() && millis() - now < RF69_CSMA_LIMIT_MS) receiveDone();
+  
   SENDERID = sender;    // TWS: Restore SenderID after it gets wiped out by receiveDone()
   sendFrame(sender, buffer, bufferSize, false, true, sendRSSI, _RSSI);   // TWS: Special override on sendFrame with extra params
   RSSI = _RSSI; // restore payload RSSI
@@ -143,6 +247,35 @@ void RFM69_ATC::sendFrame(uint8_t toAddress, const void* buffer, uint8_t bufferS
   setMode(RF69_MODE_STANDBY);
 }
 
+
+//=============================================================================
+// receiveDone() - added extra code to base class implementation to completely restore SREG
+//=============================================================================
+bool RFM69_ATC::receiveDone() {
+  uint8_t rd_SREG = SREG;
+  noInterrupts();
+  // Note: New SPI library prefers to use EIMSK (external interrupt mask) if available 
+  // to mask (only) interrupts registered via SPI::usingInterrupt(). It only 
+  // falls back to disabling ALL interrupts SREG if EIMSK cannot be used.
+  // Hence We cannot assume that methods calls below that call select() unselect() 
+  // will result in a call to noInterrupts(). 
+  // Thus the code below needs to explicitly do this to be safe.
+  if (_mode == RF69_MODE_RX && PAYLOADLEN > 0)
+  {
+    setMode(RF69_MODE_STANDBY); 
+    SREG = rd_SREG;   // enables interrupts
+    return true;
+  }
+  else if (_mode == RF69_MODE_RX) // already in RX no payload yet
+  {
+    SREG = rd_SREG;
+    return false;
+  }
+  receiveBegin();
+  SREG = rd_SREG;
+  return false;
+}
+
 //=============================================================================
 // interruptHook() - gets called by the base class interrupt handler right after the header is fetched.
 //=============================================================================
@@ -189,7 +322,6 @@ void RFM69_ATC::receiveBegin() {
 void RFM69_ATC::setPowerLevel(uint8_t powerLevel)
 {
   // TWS Update: allow power level selections above 31.  Select appropriate PA based on the value
-    
   _transmitLevel = powerLevel;    // save this for later in case we do auto power control.
   _powerBoost = (powerLevel >= 50);
   
@@ -234,7 +366,7 @@ void RFM69_ATC::setHighPower(bool onOff, byte PA_ctl) {
     writeReg(REG_PALEVEL, _powerLevel | PA_ctl ); //TWS: enable selected P1 & P2 amplifier stages
   }
   else {
-    _PA_Reg = RF_PALEVEL_PA0_ON;        // TWS: save to reflect register value
+   _PA_Reg = RF_PALEVEL_PA0_ON;        // TWS: save to reflect register value
     writeReg(REG_PALEVEL, RF_PALEVEL_PA0_ON | RF_PALEVEL_PA1_OFF | RF_PALEVEL_PA2_OFF | _powerLevel); //enable P0 only
   }
 }
@@ -277,3 +409,218 @@ byte RFM69_ATC::setLNA(byte newReg) {  // TWS: New method used to disable LNA AG
   
   return oldReg;  // return the original value in case we need to restore it
 }
+
+
+//=============================================================================
+// static pointer to 'this' needed by irq handler
+//=============================================================================
+static RFM69_ATC*  pRadio;
+
+//=============================================================================
+// irq handler, simply calls listenIrq method so internal methods can be accessed easily
+//=============================================================================
+static void irq() 
+{
+  pRadio->listenIrq();
+}
+
+
+//=============================================================================
+// listenIrq() - only called by listen irq handler
+//=============================================================================
+void RFM69_ATC::listenIrq(void)
+{
+  if( listenReceivedSize != 0 ) return;
+  
+  noInterrupts();
+  
+  select();
+  SPI.transfer(REG_FIFO & 0x7F);
+  uint8_t len = SPI.transfer(0);
+  uint8_t tnode = SPI.transfer(0);
+  union                     // union to simplify addressing of long and short parts of time offset
+  {
+    uint32_t l;
+    uint8_t  b[4];
+  } offset;
+  
+  offset.l = 0;            // initialize full word to 0 so we only lower bytes
+  
+  if( len-- > 3 ) {          // include 2 bytes for time slot
+    offset.b[0] =  SPI.transfer( 0 );  // and get the time slot
+    offset.b[1] =  SPI.transfer( 0 );
+    len = len > (listenMaxSize+2) ? listenMaxSize : len-2; // precaution (include the extra two bytes for time slot
+    for( uint8_t i = 0; i < len; i++ ) {
+      uint8_t b = SPI.transfer( 0 );
+      listenBuffer[i] = b;
+    }
+  }
+  
+  unselect();
+  interrupts();
+  
+  if( tnode == _address || tnode == RF69_BROADCAST_ADDR )
+  {
+    listenReceivedSize = len;
+    receivedOffset = offset.l;  // save the time slot offset
+  }
+}
+
+
+//=============================================================================
+// startListening() - switch radio to Listen Mode in prep for sleep until burst
+//=============================================================================
+void RFM69_ATC::startListening(void* buf, uint8_t size )
+{
+  pRadio = this;
+  
+  listenMaxSize = size;
+  listenBuffer = (byte*)buf;
+
+  listenReceivedSize = 0;
+
+  detachInterrupt( RF69_IRQ_NUM );
+  attachInterrupt( RF69_IRQ_NUM, irq, RISING);
+  encrypt( 0 );   // added to ensure encryption is off during listening mode
+  setMode( RF69_MODE_STANDBY );
+  
+  writeReg( REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01 );
+
+  writeReg( REG_FRFMSB, readReg( REG_FRFMSB) + 1);
+  writeReg( REG_FRFLSB, readReg( REG_FRFLSB));      // MUST write to LSB to affect change!
+  
+
+#ifdef LISTEN_HIGHSPEED
+  writeReg( REG_BITRATEMSB, RF_BITRATEMSB_200000);
+  writeReg( REG_BITRATELSB, RF_BITRATELSB_200000);
+  writeReg( REG_FDEVMSB, RF_FDEVMSB_100000 );
+  writeReg( REG_FDEVLSB, RF_FDEVLSB_100000 );
+  writeReg( REG_RXBW, RF_RXBW_DCCFREQ_000 | RF_RXBW_MANT_16 | RF_RXBW_EXP_0 );
+#endif
+  
+  writeReg( REG_PACKETCONFIG2, RF_PACKET2_RXRESTARTDELAY_NONE | RF_PACKET2_AUTORXRESTART_ON | RF_PACKET2_AES_OFF );
+
+  writeReg( REG_PACKETCONFIG1, RF_PACKET1_FORMAT_VARIABLE | RF_PACKET1_DCFREE_WHITENING | RF_PACKET1_CRC_ON | RF_PACKET1_CRCAUTOCLEAR_ON  );
+  writeReg( REG_SYNCVALUE1, 0x5A );
+  writeReg( REG_SYNCVALUE2, 0x5A );
+  writeReg( REG_LISTEN1, RF_LISTEN1_RESOL_RX_64 | RF_LISTEN1_RESOL_IDLE_262000 |
+          RF_LISTEN1_CRITERIA_RSSI | RF_LISTEN1_END_10 );
+  writeReg( REG_LISTEN2, 11 );
+#ifdef LISTEN_HIGHSPEED
+  writeReg( REG_LISTEN3, 4 );
+#else 
+  writeReg( REG_LISTEN3, 6 );
+#endif  
+
+  writeReg( REG_RSSITHRESH, 200 );
+  writeReg( REG_RXTIMEOUT2, 75 );
+  
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTEN_ON  | RF_OPMODE_STANDBY );
+}
+
+
+//=============================================================================
+// listenReceivedBytes() - returns the number of bytes received in listen burst
+//=============================================================================
+uint8_t RFM69_ATC::listenReceivedBytes(void)
+{
+  return listenReceivedSize;
+}
+
+//=============================================================================
+// listenReceivedOffset() - returns the time offset of when this radio saw the burst.
+//=============================================================================
+uint32_t RFM69_ATC::listenReceivedOffset(void)
+{
+  return receivedOffset;
+}
+
+//=============================================================================
+// clearListenBuffer() - empty the listen buffer prior to sleeping.
+//=============================================================================
+void RFM69_ATC::clearListenBuffer(void)
+{
+  listenReceivedSize = 0;
+  receivedOffset = 0;
+}
+
+//=============================================================================
+// endListening() - stop the radio from listenMode
+//=============================================================================
+void RFM69_ATC::endListening( bool reInitialize )
+{
+  detachInterrupt( RF69_IRQ_NUM );
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_RXTIMEOUT2, 0 );
+  setMode( RF69_MODE_STANDBY );
+  while ((readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00); // wait for ModeReady
+
+}
+
+//=============================================================================
+// sendBurst() - send a burst of packets to a sleeping listening node (or all)
+//=============================================================================
+void RFM69_ATC::sendBurst( uint8_t targetNode, void* buffer, uint8_t size )
+{
+  detachInterrupt( RF69_IRQ_NUM );
+  encrypt( 0 );
+  setMode( RF69_MODE_STANDBY );
+
+  writeReg( REG_PACKETCONFIG1, RF_PACKET1_FORMAT_VARIABLE | RF_PACKET1_DCFREE_WHITENING | RF_PACKET1_CRC_ON | RF_PACKET1_CRCAUTOCLEAR_ON  );
+  writeReg( REG_SYNCVALUE1, 0x5A );
+  writeReg( REG_SYNCVALUE2, 0x5A );
+
+  writeReg( REG_FRFMSB, readReg( REG_FRFMSB) + 1);
+  writeReg( REG_FRFLSB, readReg( REG_FRFLSB));      // MUST write to LSB to affect change!
+
+#ifdef LISTEN_HIGHSPEED
+  writeReg( REG_BITRATEMSB, RF_BITRATEMSB_200000);
+  writeReg( REG_BITRATELSB, RF_BITRATELSB_200000);
+  writeReg( REG_FDEVMSB, RF_FDEVMSB_100000 );
+  writeReg( REG_FDEVLSB, RF_FDEVLSB_100000 );
+  writeReg( REG_RXBW, RF_RXBW_DCCFREQ_000 | RF_RXBW_MANT_16 | RF_RXBW_EXP_0 );
+#endif  
+
+  
+  
+  setMode( RF69_MODE_TX );
+  
+  uint32_t time = millis();
+  union                     // union to simplify addressing of long and short parts of time offset
+  {
+    uint32_t l;
+    uint8_t  b[4];
+  } offset;
+  
+  offset.l = 0;            // first offset is naturally 0
+    
+  while( offset.l < 3000 ) 
+  {
+
+    noInterrupts();
+    // write to FIFO
+    select();
+    SPI.transfer(REG_FIFO | 0x80);
+    SPI.transfer( size + 3);      // add an extra 2 bytes for time offset of this packet
+    SPI.transfer( targetNode );
+    SPI.transfer( offset.b[0] );  // send the time offset for this packet
+    SPI.transfer( offset.b[1] );
+
+    for (uint8_t i = 0; i < size; i++)
+        SPI.transfer(((uint8_t*) buffer)[i]);
+    unselect();
+    interrupts();
+//    uint32_t txStart = millis();
+//    while (digitalRead(RF69_IRQ_NUM) == 0 && millis() - txStart < RF69_TX_LIMIT_MS); // wait for DIO0 to turn HIGH signalling transmission finish
+//    setMode( RF69_MODE_STANDBY );
+    
+    delayMicroseconds( 5000 );
+    offset.l = millis() - time;  // get the 'time' of the next packet
+    
+  }
+  setMode( RF69_MODE_STANDBY );
+}
+
+

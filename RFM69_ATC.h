@@ -36,10 +36,15 @@ class RFM69_ATC: public RFM69 {
     static volatile byte ACK_RSSI_REQUESTED;  // new flag in CTL byte to request RSSI with ACK (could potentially be merged with ACK_REQUESTED)
 
     RFM69_ATC(uint8_t slaveSelectPin=RF69_SPI_CS, uint8_t interruptPin=RF69_IRQ_PIN, bool isRFM69HW=false, uint8_t interruptNum=RF69_IRQ_NUM) :
-      RFM69(slaveSelectPin, interruptPin, isRFM69HW, interruptNum) {
+      RFM69(slaveSelectPin, interruptPin, isRFM69HW, interruptNum) 
+    {
+        listenReceivedSize=0;
+        receivedOffset=0;
     }
     
     bool initialize(uint8_t freqBand, uint8_t ID, uint8_t networkID=1);
+    void restoreInit(uint8_t freqBand, uint8_t ID, uint8_t networkID=1);  // same as init except maintains powerlevel settings  #define TM_MOTE_VERSION "0.9.14"
+    bool receiveDone(void);
     void sendACK(const void* buffer = "", uint8_t bufferSize=0);
 
     void setHighPower(bool onOFF=true, byte PA_ctl=0x60); //have to call it after initialize for RFM69HW
@@ -48,6 +53,17 @@ class RFM69_ATC: public RFM69 {
     int  getAckRSSI(void);                      // TWS: New method to retrieve the ack'd RSSI (if any)
     byte setLNA(byte newReg);                   // TWS: function to control LNA reg for power testing purposes
     void setMode(byte mode);  // TWS: moved from protected to try to build block()/unblock() wrapper
+
+    //=======================================================================
+    // New methods to handle listenMode & burst wake up
+    //=======================================================================
+    void startListening( void* buffer, uint8_t size );
+    void endListening( bool reInitialize=false );
+    uint8_t  listenReceivedBytes(void);
+    uint32_t listenReceivedOffset(void);
+    void clearListenBuffer(void);
+    void sendBurst( uint8_t targetNode, void* buffer, uint8_t size );
+    void listenIrq(void);
 
     int  _targetRSSI;     // if non-zero then this is the desired end point RSSI for our transmission
     byte _transmitLevel;  // saved powerLevel in case we do auto power adjustment, this value gets dithered
@@ -60,10 +76,19 @@ class RFM69_ATC: public RFM69 {
     int16_t _ackRSSI;         // this contains the RSSI our destination Ack'd back to us (if we enabledAutoPower)
     bool    _powerBoost;      // this controls whether we need to turn on the highpower regs based on the setPowerLevel input
     uint8_t _PA_Reg;          // saved and derived PA control bits so we don't have to spend time reading back from SPI port
+    
+    //=======================================================================
+    // New members to handle listenMode & burst wake up
+    //=======================================================================
+    volatile uint8_t  listenReceivedSize;
+    volatile uint32_t receivedOffset;
+    uint8_t listenMaxSize;
+    byte*   listenBuffer;
 
     void receiveBegin();
     void setHighPowerRegs(bool onOff);
-
+    void select(void);
+    void unselect(void);
 };
 
 #endif
