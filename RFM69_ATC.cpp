@@ -419,11 +419,8 @@ static RFM69_ATC*  pRadio;
 //=============================================================================
 // irq handler, simply calls listenIrq method so internal methods can be accessed easily
 //=============================================================================
-extern uint32_t irqCount;
 static void irq() 
 {
-  digitalWrite(7,LOW); // DEBUG: pin to signal events
-  irqCount++;
   pRadio->listenIrq();
 }
 
