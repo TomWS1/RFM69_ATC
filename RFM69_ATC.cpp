@@ -74,8 +74,8 @@ bool RFM69_ATC::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
 #else
   #error "MUST HAVE SPI_HAS_TRANSACTION DEFINED!"
 #endif
-  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
-  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
+  writeReg( REG_OPMODE, RF_OPMODE_STANDBY );
   writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
   
   bool rc = RFM69::initialize(freqBand, nodeID, networkID);  // use base class to initialize most everything
@@ -93,8 +93,8 @@ void RFM69_ATC::restoreInit(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
 
   _ackRSSI = 0;           // TWS: no existing response yet...
   ACK_RSSI_REQUESTED = 0; // TWS: init to none
-  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
-  writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
+  writeReg( REG_OPMODE, RF_OPMODE_LISTENABORT | RF_OPMODE_STANDBY );  // make sure Listen mode is aborted
+  writeReg( REG_OPMODE, RF_OPMODE_STANDBY );
   writeReg( REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_STANDBY );
   
   RFM69::initialize(freqBand, nodeID, networkID);  // use base class to re-initialize most everything
@@ -419,8 +419,11 @@ static RFM69_ATC*  pRadio;
 //=============================================================================
 // irq handler, simply calls listenIrq method so internal methods can be accessed easily
 //=============================================================================
+extern uint32_t irqCount;
 static void irq() 
 {
+  digitalWrite(7,LOW); // DEBUG: pin to signal events
+  irqCount++;
   pRadio->listenIrq();
 }
 
@@ -612,11 +615,8 @@ void RFM69_ATC::sendBurst( uint8_t targetNode, void* buffer, uint8_t size )
         SPI.transfer(((uint8_t*) buffer)[i]);
     unselect();
     interrupts();
-//    uint32_t txStart = millis();
-//    while (digitalRead(RF69_IRQ_NUM) == 0 && millis() - txStart < RF69_TX_LIMIT_MS); // wait for DIO0 to turn HIGH signalling transmission finish
-//    setMode( RF69_MODE_STANDBY );
     
-    delayMicroseconds( 5000 );
+    while ((readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_FIFONOTEMPTY) != 0x00);  // make sure packet is sent before putting more into the FIFO
     offset.l = millis() - time;  // get the 'time' of the next packet
     
   }
